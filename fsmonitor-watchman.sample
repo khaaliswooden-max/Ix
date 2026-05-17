@@ -1,0 +1,110 @@
+"""
+ix_substrate.contracts.events
+─────────────────────────────
+Data contracts emitted by Phase 0 (Substrate) and consumed by Phase 1
+(World Model). These are append-only, content-addressable, and versioned.
+
+Design principle: the substrate layer is the *only* layer that emits raw
+market events. Every downstream layer (world model, strategy, risk)
+consumes these contracts, never raw feed payloads. This is what makes the
+seven-layer architecture clean.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field, ConfigDict
+
+
+SCHEMA_VERSION = "0.1.0"
+
+
+class FeedKind(str, Enum):
+    """Origin class of a market data feed."""
+    CEX = "cex"            # centralized exchange (ccxt-backed)
+    DEX = "dex"            # decentralized exchange (web3-backed)
+    ONCHAIN = "onchain"    # raw chain events (transfers, contract logs)
+    OFFCHAIN = "offchain"  # news, social, regulatory
+
+
+class Side(str, Enum):
+    BID = "bid"
+    ASK = "ask"
+
+
+class _ImmutableModel(BaseModel):
+    """Frozen, validated, hashable base. Contracts are append-only."""
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+
+# ── Tick events ──────────────────────────────────────────────────────────
+
+class TickEvent(_ImmutableModel):
+    """
+    A single observation of best bid / best ask on one venue.
+
+    Timestamps are explicit:
+      - venue_ts: timestamp claimed by the exchange (may be skewed)
+      - ingress_ts: timestamp at which we received it (NTP-disciplined)
+    The skew (ingress_ts - venue_ts) is itself a signal — see clock.py.
+    """
+    schema_version: str = SCHEMA_VERSION
+    feed_kind: FeedKind
+    venue: str                                 # e.g. "binance", "coinbase"
+    symbol: str                                # canonical symbol, e.g. "BTC/USDT"
+    venue_ts: datetime                         # exchange-reported timestamp
+    ingress_ts: datetime                       # our NTP-disciplined receive time
+    bid_price: Decimal
+    bid_size: Decimal
+    ask_price: Decimal
+    ask_size: Decimal
+
+    @property
+    def mid(self) -> Decimal:
+        return (self.bid_price + self.ask_price) / Decimal(2)
+
+    @property
+    def spread_bps(self) -> Decimal:
+        """Spread in basis points (1bp = 0.01%)."""
+        if self.mid == 0:
+            return Decimal(0)
+        return (self.ask_price - self.bid_price) / self.mid * Decimal(10_000)
+
+    @property
+    def skew_ms(self) -> float:
+        """Positive = we received later than venue stamped."""
+        return (self.ingress_ts - self.venue_ts).total_seconds() * 1000.0
+
+
+# ── Reconciliation output ────────────────────────────────────────────────
+
+class DisagreementKind(str, Enum):
+    """What kind of cross-feed disagreement was detected."""
+    PRICE = "price"          # mid prices differ beyond expected band
+    DIRECTION = "direction"  # one feed says up, other says down (window)
+    LATENCY = "latency"      # one feed is persistently ahead of another
+    LIQUIDITY = "liquidity"  # depth profiles differ at similar prices
+
+
+class DisagreementEvent(_ImmutableModel):
+    """
+    Cross-feed disagreement, treated as alpha rather than noise.
+
+    Emitted whenever a configured detector finds disagreement that exceeds
+    its threshold. Persistence (half_life_ms) tells downstream layers
+    whether this is a fleeting microstructure anomaly or a regime signal.
+    """
+    schema_version: str = SCHEMA_VERSION
+    kind: DisagreementKind
+    symbol: str
+    venues: tuple[str, ...]                    # ordered, the comparison key
+    window_start: datetime
+    window_end: datetime
+    magnitude: Decimal                         # interpretation depends on kind
+    magnitude_unit: Literal["bps", "ms", "ratio", "boolean"]
+    leader: str | None = None                  # for LATENCY: which venue leads
+    half_life_ms: float | None = None          # persistence; None if too brief
+    raw_observations: int = Field(ge=2)

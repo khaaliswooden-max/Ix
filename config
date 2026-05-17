@@ -1,0 +1,36 @@
+"""
+ix_substrate.storage.schema
+────────────────────────────
+Arrow schemas for the substrate's tables. Arrow is the lingua franca:
+DuckDB, Polars, ClickHouse, and Parquet all consume it natively.
+"""
+from __future__ import annotations
+
+import pyarrow as pa
+
+TICKS_SCHEMA = pa.schema([
+    ("schema_version", pa.string()),
+    ("feed_kind",      pa.string()),
+    ("venue",          pa.string()),
+    ("symbol",         pa.string()),
+    ("venue_ts",       pa.timestamp("us", tz="UTC")),
+    ("ingress_ts",     pa.timestamp("us", tz="UTC")),
+    ("bid_price",      pa.decimal128(38, 18)),
+    ("bid_size",       pa.decimal128(38, 18)),
+    ("ask_price",      pa.decimal128(38, 18)),
+    ("ask_size",       pa.decimal128(38, 18)),
+])
+
+DISAGREEMENTS_SCHEMA = pa.schema([
+    ("schema_version",    pa.string()),
+    ("kind",              pa.string()),
+    ("symbol",            pa.string()),
+    ("venues",            pa.list_(pa.string())),
+    ("window_start",      pa.timestamp("us", tz="UTC")),
+    ("window_end",        pa.timestamp("us", tz="UTC")),
+    ("magnitude",         pa.decimal128(38, 18)),
+    ("magnitude_unit",    pa.string()),
+    ("leader",            pa.string()),
+    ("half_life_ms",      pa.float64()),
+    ("raw_observations",  pa.int64()),
+])

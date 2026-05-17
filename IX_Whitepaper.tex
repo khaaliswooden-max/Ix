@@ -1,0 +1,354 @@
+% ============================================================================
+%   IX: A Tractable Descendant of AIXI for Autonomous Capital Compounding
+%   Aldrich K. Wooden, Sr.  --  Zuup Innovation Lab / Visionblox LLC
+%   Draft v0.1  --  May 2026
+%
+%   Build:
+%     pdflatex IX_Whitepaper
+%     bibtex   IX_Whitepaper
+%     pdflatex IX_Whitepaper
+%     pdflatex IX_Whitepaper
+% ============================================================================
+
+\documentclass[conference,10pt,letterpaper]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+% ---------------------------------------------------------------------------
+%  Zuup epistemic markers (Verified / Plausible / Speculative)
+% ---------------------------------------------------------------------------
+\newcommand{\EV}{\textcolor{black}{\ensuremath{\checkmark}}\,}        % VERIFIED
+\newcommand{\EP}{\textcolor{black}{\ensuremath{\circleddash}}\,}     % PLAUSIBLE
+\newcommand{\ES}{\textcolor{black}{\ensuremath{\bigcirc}}\,}         % SPECULATIVE
+
+% Declare the original Unicode markers as alternates (allows utf8 source too)
+\DeclareUnicodeCharacter{2713}{\EV}
+\DeclareUnicodeCharacter{25D0}{\EP}
+\DeclareUnicodeCharacter{25EF}{\ES}
+\DeclareUnicodeCharacter{00D7}{\ensuremath{\times}}
+\DeclareUnicodeCharacter{2014}{---}
+\DeclareUnicodeCharacter{2013}{--}
+\DeclareUnicodeCharacter{2264}{\ensuremath{\leq}}
+\DeclareUnicodeCharacter{2265}{\ensuremath{\geq}}
+\DeclareUnicodeCharacter{0394}{\ensuremath{\Delta}}
+\DeclareUnicodeCharacter{03B5}{\ensuremath{\varepsilon}}
+\DeclareUnicodeCharacter{2248}{\ensuremath{\approx}}
+
+% ===========================================================================
+\begin{document}
+
+\title{IX: A Tractable Descendant of AIXI \\ for Autonomous Capital Compounding}
+
+\author{
+  \IEEEauthorblockN{Aldrich K. Wooden, Sr., MBA}
+  \IEEEauthorblockA{\textit{Zuup Innovation Lab} \quad \textit{Visionblox LLC} \\
+                    Huntsville, AL, USA \\
+                    Draft v0.1 --- May 2026}
+}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\begin{abstract}
+We introduce IX, a tractable architecture for an autonomous agent whose
+objective is recursive self-financing (RSF): the systematic
+deployment of recurring operator capital contributions and the
+reinvestment of agent-generated returns toward a specified terminal
+liquidity target. IX inherits its theoretical scaffolding
+from Hutter's AIXI and its computational pattern from the MC-AIXI-CTW
+approximation of Veness \textit{et al.}, substituting AIXI's uncomputable
+universal prior with a domain-specific Bayesian world model over market
+microstructure, and substituting its expectimax planner with policy-guided
+Monte Carlo tree search under an explicit ruin-probability constraint. We
+propose IX-Bench v0.1, an eight-family benchmark suite that grades agents on
+returns, risk, recursion quality, and probability-of-target-achievement under
+stated capital constraints. We outline a seven-phase implementation pipeline
+mapped to USPTO prior-art clusters and open-source repository anchors. We
+close with a non-optional treatment of empirical reality: a 2.5\%
+monthly compound return (34.5\% annualized) sits in the top decile of
+documented systematic returns---below Renaissance Medallion's
+$\sim$40\% lifetime average but materially above commodity quant
+benchmarks. The benchmark is structured to surface the gap between
+assumed and achieved rather than obscure it.
+\end{abstract}
+
+\begin{IEEEkeywords}
+AIXI, MC-AIXI-CTW, recursive self-financing, autonomous agents,
+Monte Carlo tree search, Kelly criterion, algorithmic trading,
+USPTO prior art
+\end{IEEEkeywords}
+
+% ===========================================================================
+\section{Introduction}
+
+A recursively self-financing agent is a closed-loop system that takes
+positions in markets, reinvests realized gains, updates its own policy from
+realized outcomes, and does so without human intervention beyond strategic
+configuration. The construct composes three problems usually studied in
+isolation: sequential decision under uncertainty, online learning under
+non-stationarity, and capital allocation under irreversibility. The first
+has a clean theoretical ceiling (AIXI). The second is the subject of
+decades of online-learning literature. The third is the source of practical
+ruin for most agents that succeed in the first two.
+
+The motivating scenario for IX is a recurring operator capital
+contribution of \$5{,}000 per month, deployed by the agent under a 2.5\%
+monthly target return (34.5\% annualized), toward a terminal liquidity
+target of \$10M after taxes. Under the stated parameters, the
+deterministic time-to-target is approximately 159 months ($\approx$13.3
+years) pre-tax and 173--184 months ($\approx$14.4--15.3 years) after
+taxes depending on the realized short-term/long-term gains mix---a
+tractable horizon, and the 2.5\%/month return assumption sits within
+the historically documented distribution of elite systematic
+performance, though sustained achievement across the full horizon is
+not commodity. Epistemic markers are used throughout: \EV{}VERIFIED,
+\EP{}PLAUSIBLE, \ES{}SPECULATIVE.
+
+% ===========================================================================
+\section{Theoretical Foundations}
+
+\subsection{The AIXI Ceiling}
+
+AIXI defines the optimal action for an agent in any computable environment
+as the action that maximizes expected future reward, where the expectation
+is taken over all computable environment hypotheses weighted by their
+Kolmogorov complexity~\cite{hutter2005universal}. Concretely, the optimal
+action at time $t$ is the argmax over $a_t$ of the expectimax expansion
+across future observations and rewards, with the inner mixture over programs
+$q$ running on a universal Turing machine $U$, each weighted by
+$2^{-\ell(q)}$ where $\ell(q)$ is program length~\cite{solomonoff1964formal}.
+\EV{}AIXI is asymptotically optimal across the class of all computable
+environments. \EV{}AIXI is uncomputable: Kolmogorov complexity is not a
+computable function.
+
+\subsection{The MC-AIXI-CTW Tractability Pattern}
+
+Veness, Ng, Hutter, Uther, and Silver~\cite{veness2011monte} demonstrated
+that AIXI's two-slot structure survives two surgical substitutions. The
+world-model slot becomes Context Tree Weighting (CTW): a Bayesian mixture
+over variable-order Markov models bounded by depth $D$, which preserves the
+mixture-of-experts character of Solomonoff induction inside a tractable model
+class. The planner slot becomes Monte Carlo tree search (MCTS): expectimax
+is replaced by stochastic rollouts that concentrate compute on promising
+branches~\cite{silver2016mastering}. The composed system is computable on
+commodity hardware and learned non-trivial domains (Pac-Man, Kuhn poker,
+TicTacToe) from scratch.
+
+\subsection{The IX Substitution}
+
+IX preserves the two-slot pattern but specializes each slot for the RSF
+domain. The world model is a hybrid: a regime-aware state-space model over
+price and volume, an on-chain liquidity and orderflow model, and a finite
+Bayesian mixture over candidate trading hypotheses whose weights are updated
+by realized PnL---preserving the AIXI-style discipline of crediting theories
+that predict correctly and shrinking those that do not. The planner is MCTS
+guided by a policy network trained via PPO~\cite{schulman2017proximal} or
+its successor, with rollouts that evaluate not only expected return but the
+realized empirical ruin probability under each candidate action. The
+objective is therefore constrained:
+%
+\begin{equation}
+\pi^{*} = \arg\max_{\pi \in \Pi}\; \mathbb{E}_{\pi}[R]
+\quad \text{subject to} \quad
+\Pr(\text{ruin} \mid \pi) \leq \varepsilon.
+\label{eq:objective}
+\end{equation}
+%
+\EP{}The constrained variant is essential when capital is irreversibly lost
+on failure; the unconstrained AIXI objective is silently incompatible with
+leveraged or concentrated betting.
+
+% ===========================================================================
+\section{Architecture: The Seven Layers}
+
+IX decomposes into seven layers, each addressing a single concern.
+Inter-layer interfaces are explicit data contracts so that any single layer
+can be reimplemented or replaced without disturbing the rest
+(Table~\ref{tab:architecture}).
+
+\begin{table}[!t]
+\caption{IX Seven-Layer Architecture}
+\label{tab:architecture}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{@{}c l X@{}}
+\toprule
+\textbf{Phase} & \textbf{Layer} & \textbf{Concern} \\
+\midrule
+0 & Substrate                  & Data ingestion; on/off-chain unified feed; latency-aware reconciliation \\
+1 & World Model                & Bayesian posterior over market regimes and competing hypotheses \\
+2 & Strategy                   & Policy generation under complexity-penalty regularization \\
+3 & Execution                  & Routing with information-leakage cost internalized \\
+4 & Risk                       & Recursive Kelly damped by self-calibration error; ruin-bounded sizing \\
+5 & Compounding                & Real-time tax-aware reinvestment scheduling \\
+6 & Self-Improvement           & Meta-learning grounded in live out-of-sample PnL \\
+7 & Compliance \& Tax          & After-tax reward signal; 1099-DA/8949 audit-trail by construction \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Two architectural choices distinguish IX from a generic deep-RL trader.
+First, the risk layer implements recursive Kelly~\cite{kelly1956new}:
+position size is the Kelly fraction multiplied by a damping coefficient that
+is a function of the agent's own recent calibration error, measured as the
+empirical Brier score on its forward predictions---an overconfident agent
+shrinks its own bet size automatically. Second, the self-improvement layer
+treats meta-loss as live realized PnL on small bounded capital, not
+backtested PnL, grounding self-modification in irreversible feedback rather
+than self-deception about a model that overfit the test set.
+
+% ===========================================================================
+\section{Benchmark Framework: IX-Bench v0.1}
+
+IX-Bench evaluates candidate agents across eight metric families. Each
+family resolves to a 0--100 sub-score; sub-scores compose into a single IX
+Capability Score (IX-CS) with weights configurable per operational phase.
+Family~8---Probabilistic Target Achievement---is the family most often
+omitted by performance frameworks and is non-optional here
+(Table~\ref{tab:benchmark}).
+
+\begin{table}[!t]
+\caption{IX-Bench v0.1 Metric Families}
+\label{tab:benchmark}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{@{}c l X@{}}
+\toprule
+\textbf{\#} & \textbf{Family} & \textbf{Representative Metrics} \\
+\midrule
+1 & Return              & CAGR, TWR, IRR \\
+2 & Risk                & MaxDD, DD Duration, VaR/CVaR, Risk-of-Ruin, Sharpe, Sortino, Calmar \\
+3 & Strategy Quality    & Win Rate, Avg Win/Loss, Profit Factor, Recovery Factor, Tail Ratio, Info Ratio vs BTC-HODL \\
+4 & Agent Performance   & Decision Latency, Brier Calibration, Tool Success, Hallucination Rate, OPE, Strategy Diversity \\
+5 & Capital Efficiency  & Utilization, Reinvestment Velocity, Slippage, Fee Ratio \\
+6 & Recursion (RSF)     & Gen-over-Gen Sharpe $\Delta$, OOS Degradation, Walk-Forward, Regime Detection, Alpha Half-Life \\
+7 & Compliance/Ops      & After-Tax Net, 1099-DA/8949 Accuracy~\cite{irs2024digital}, AML FP Rate, Audit Coverage, Custody Risk \\
+8 & Probabilistic Target & $\Pr(\$10\text{M after-tax by m175})$, $\Pr(\text{cumulative-return-negative at horizon})$, $\mathbb{E}[\text{time to target}]$, return-distribution quantiles, monthly-return drawdown distribution, model misspec sensitivity \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ===========================================================================
+\section{Implementation Pipeline}
+
+Each phase pairs a USPTO prior-art cluster---a region of patent space
+densely covered by existing claims---with a non-obvious gap and an
+open-source repository anchor that minimizes the rebuild surface
+(Table~\ref{tab:pipeline}). Build stack: Claude Code for primary
+implementation; Cursor for IDE iteration on Phases 1--2; Gemini for
+second-pass verification of Kelly derivations, ruin-probability arithmetic,
+and patent-claim novelty against the USPTO record; Claude (interactive
+thread) for architecture and document iteration.
+
+\begin{table*}[!t]
+\caption{IX Implementation Pipeline: USPTO Prior-Art Clusters and Open-Source Anchors}
+\label{tab:pipeline}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabularx}{\textwidth}{@{}l l X X@{}}
+\toprule
+\textbf{Phase} & \textbf{USPTO Cluster (CPC)} & \textbf{Non-Obvious Gap} & \textbf{Open-Source Anchors} \\
+\midrule
+0~--~Substrate         & G06Q40/04             & Cross-feed disagreement treated as alpha signal, not noise to average away                       & ccxt, web3.py / ethers.js, clickhouse / arctic, polars / duckdb \\
+1~--~World Model       & G06N5/04, G06N3/08    & Explicit Bayesian posterior over competing market hypotheses; disagreement as exploration signal & hmmlearn, pytorch-forecasting, mlfinlab, vectorbt, tslearn \\
+2~--~Strategy          & G06N3/126, G06Q40/00  & Strategy synthesis under explicit Kolmogorov-complexity penalty as generalization regularizer    & DEAP, PyGAD, stable-baselines3, Ray RLlib, FinRL \\
+3~--~Execution         & G06Q40/04             & Routing that internalizes the agent's own information-leakage cost; slippage treated as endogenous & hummingbot, jesse, freqtrade, 1inch SDK, cowswap \\
+4~--~Risk              & G06Q40/06             & Recursive Kelly damped by self-calibration error (Brier-score-driven sizing damping)             & empyrical, pyfolio, riskfolio-lib, cvxpy, quantstats \\
+5~--~Compounding       & G06Q40/06             & Real-time pricing of marginal compounding opportunity vs.\ marginal tax cost                     & defi-sdk, aave-v3-sdk, backtesting.py \\
+6~--~Self-Improvement  & G06N3/08, G06N20/00   & Meta-loss grounded in live OOS PnL on bounded real capital, not backtest                         & Optuna, Ray Tune, NNI, MAML reference implementations \\
+7~--~Compliance        & G06Q40/12             & RL reward signal = after-tax net realized, not gross PnL (1099-DA-aware)                         & rotki, open IRS-form generators \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+% ===========================================================================
+\section{Risk, Reality, and Honest Limitations}
+
+Any whitepaper that omits the following is engaged in rhetorical performance
+rather than research.
+
+\subsection{The 2.5\%-Monthly Calibration}
+
+\EV{}A 2.5\% monthly compound return corresponds to a 34.5\%
+annualized return. This sits below Renaissance Medallion's lifetime
+average of $\sim$40\% annually net of fees but materially above
+commodity quant benchmarks: top-quartile systematic CTAs have
+historically realized 15--25\% annualized; top-decile hedge funds
+20--30\%; the S\&P~500 long-run $\sim$10\%. \EP{}The 2.5\%/month
+assumption therefore sits in the top decile of documented systematic
+performance over multi-year horizons---aggressive but not at the
+boundary of the historical record. \EP{}Achievability is more
+plausible at the \$5{,}000/month scale than at fund scale: small-capital
+strategies can exploit microstructure regimes that do not scale, can
+deploy leverage flexibly without meaningful market impact, and face less
+alpha decay from public-record competition. \ES{}Nonetheless, sustained
+2.5\%/month average across the full 159-month pre-tax horizon---through
+multiple regime transitions, asset rotations, and bear markets---is
+not commodity. Even Medallion has had down years. The architectural
+defenses against return-rate erosion are: regime-adaptive strategy
+switching (Phase~1's mixture posterior); recursive Kelly with
+self-calibration damping (Phase~4) to compress drawdowns when
+overconfidence is detected; and tax-aware holding-period optimization
+(Phase~7) whose value grows in absolute terms as the return rate falls.
+The agent's responsibility under IX-Bench is to report the realized
+rolling return distribution honestly, not to claim deterministic
+achievement of the geometric mean.
+
+\subsection{Regulatory and Tax Surface}
+
+\EV{}Autonomous trading by U.S.\ persons is subject to CFTC, SEC, and
+FinCEN regimes depending on instrument class. \EV{}Digital asset gains
+are reported on Form 8949 and Schedule D, with broker reporting under
+Form 1099-DA effective from 2026~\cite{irs2024digital}. \EV{}Tax drag
+is material to the \$10M-after-tax target: assuming the top U.S.\
+federal marginal bracket plus Alabama state income tax (5\%), gains
+treated as long-term ($\geq$1 year holding) face an effective rate of
+$\sim$29\% (20\% federal LTCG + 3.8\% NIIT + 5\% state), while gains
+treated as short-term face $\sim$46\% (37\% federal ordinary + 3.8\%
+NIIT + 5\% state). The corresponding gross targets are \$14.1M and
+\$18.5M respectively, translating to 173 months at the long-term
+extreme and 184 months at the short-term extreme, against the
+159-month pre-tax horizon. Active monthly rebalancing pushes most
+realized gains into the short-term regime by default; the Phase~7
+compliance layer must therefore actively manage holding-period
+optimization to materially compress the time-to-target. Note that the
+tax-drag penalty in absolute months grows as the assumed return rate
+falls: an 11-month tax penalty at 2.5\%/month corresponds to the same
+dollar tax burden as the 5--12-month penalty at 5\%/month, but is more
+costly in calendar time because the underlying compounding is slower. \EP{}Operating an autonomous
+agent on behalf of any party other than the operator introduces
+fiduciary and registration questions whose resolution depends on
+jurisdiction and on whether the operator is acting as an investment
+adviser. The compliance layer (Phase~7) is non-negotiable and is
+therefore architecturally co-equal with the return-generating layers.
+
+% ===========================================================================
+\section{Conclusion and Future Work}
+
+IX is a research program, not a product. Its contribution is threefold: a
+clean theoretical lineage from AIXI through MC-AIXI-CTW to a domain-specific
+tractable agent; a benchmark framework that grades agents probabilistically
+and refuses to obscure the gap between target and feasible; and a
+seven-phase pipeline mapped to USPTO prior-art clusters and open-source
+anchors. Future work: derivation of the constrained-MCTS variant with
+formal ruin-probability bounds; empirical calibration of CTW depth for
+crypto microstructure; formal definition of the IX-RSI metric (Recursive
+Sharpe Improvement); and small-capital live trials with hard ruin-probability
+ceilings to populate Family~8 of IX-Bench with empirical posteriors.
+
+% ===========================================================================
+\bibliographystyle{IEEEtran}
+\bibliography{Ref}
+
+\end{document}
