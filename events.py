@@ -1,90 +1,178 @@
 """
-ix_substrate.feeds.cex
-───────────────────────
-Centralized-exchange feed backed by ccxt's async API. One CexFeed instance
-streams best bid/ask for one (venue, symbol) pair.
+ix_world_model.inference.orchestrator
+──────────────────────────────────────
+Wires Phase 0 (Substrate) events to the regime classifier and the
+hypothesis ensemble, producing MarketSnapshot events for Phase 2.
 
-Notes:
-- ccxt's REST polling is intentional here for v0.1: WebSocket streams via
-  ccxt.pro are paid. The substrate's reconciliation logic doesn't depend
-  on WebSocket cadence; for tight microstructure work, upgrade to ccxt.pro
-  or per-venue native WS clients in v0.2.
-- All public-market endpoints used here are unauthenticated.
+This module is the only place in Phase 1 that imports from Phase 0. All
+other Phase 1 modules operate on internal feature/event types.
 """
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
-from typing import AsyncIterator
+from typing import Mapping
 
-from ..contracts.events import FeedKind, TickEvent
+# Phase 0 contracts. In production this is a pip-installed dependency
+# (ix-substrate); in this scaffold we expect it to be importable.
+try:
+    from ix_substrate.contracts.events import (
+        DisagreementEvent,
+        TickEvent,
+    )
+except ImportError:  # pragma: no cover
+    # Allow Phase 1 tests to run without Phase 0 installed by providing
+    # minimal duck-type shims. Real deployments require the real package.
+    TickEvent = object        # type: ignore
+    DisagreementEvent = object  # type: ignore
+
+from ..contracts.events import (
+    HypothesisWeights,
+    MarketSnapshot,
+    RegimePosterior,
+)
+from ..hypotheses.ensemble import EnsembleConfig, HypothesisEnsemble
+from ..regimes.classifier import (
+    ClassifierConfig,
+    DEFAULT_PROFILES,
+    RegimeClassifier,
+    RegimeProfile,
+)
+from ..regimes.features import FeatureConfig, FeatureExtractor
 
 
-class CexFeed:
-    """REST-polled best bid/ask feed for one venue + one symbol."""
+# ── Configuration ────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class WorldModelConfig:
+    symbol: str
+    hypothesis_names: tuple[str, ...]
+    feature_config: FeatureConfig = field(default_factory=FeatureConfig)
+    classifier_config: ClassifierConfig = field(default_factory=ClassifierConfig)
+    ensemble_config: EnsembleConfig = field(default_factory=EnsembleConfig)
+
+
+# ── Orchestrator ─────────────────────────────────────────────────────────
+
+class WorldModel:
+    """
+    Per-symbol orchestrator. Feed it Phase 0 events, get Phase 1
+    MarketSnapshots out.
+
+    Usage:
+        wm = WorldModel(WorldModelConfig(
+            symbol="BTC/USDT",
+            hypothesis_names=("trend", "meanrev", "carry"),
+        ))
+
+        # As Phase 0 events arrive:
+        wm.observe_tick(tick)         # TickEvent from Phase 0
+        wm.observe_disagreement(dis)  # DisagreementEvent from Phase 0
+
+        # Phase 2 / Phase 3 reports realized hypothesis PnL each step:
+        wm.report_hypothesis_pnl({"trend": ..., "meanrev": ..., "carry": ...})
+
+        # Then read the current snapshot:
+        snapshot = wm.snapshot(now)
+    """
 
     def __init__(
         self,
-        venue: str,
-        symbol: str,
-        poll_ms: int = 1000,
-        ccxt_kwargs: dict | None = None,
+        config: WorldModelConfig,
+        profiles: Mapping = DEFAULT_PROFILES,
     ):
-        self.venue = venue
-        self.symbols = (symbol,)
-        self._symbol = symbol
-        self._poll_ms = poll_ms
-        self._ccxt_kwargs = ccxt_kwargs or {}
-        self._client = None
+        self.cfg = config
+        self._features = FeatureExtractor(
+            symbol=config.symbol, config=config.feature_config
+        )
+        self._classifier = RegimeClassifier(
+            symbol=config.symbol,
+            profiles=dict(profiles),
+            config=config.classifier_config,
+        )
+        self._ensemble = HypothesisEnsemble(
+            symbol=config.symbol,
+            hypothesis_names=list(config.hypothesis_names),
+            config=config.ensemble_config,
+        )
+        self._last_regime: RegimePosterior | None = None
+        self._last_timestamp: datetime | None = None
 
-    async def __aenter__(self) -> "CexFeed":
-        # Imported lazily so the package imports without ccxt installed
-        # (e.g. in CI where we only want to run unit tests on disagreement).
-        import ccxt.async_support as ccxt  # type: ignore
+    # ── Phase 0 inputs ─────────────────────────────────────────
 
-        klass = getattr(ccxt, self.venue, None)
-        if klass is None:
-            raise ValueError(f"ccxt has no exchange called {self.venue!r}")
-        self._client = klass({"enableRateLimit": True, **self._ccxt_kwargs})
-        return self
+    def observe_tick(self, tick) -> RegimePosterior | None:
+        """
+        Consume a TickEvent. Returns updated RegimePosterior if enough
+        data has accumulated, else None.
+        """
+        if tick.symbol != self.cfg.symbol:
+            return None  # silently ignore other symbols
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
+        fv = self._features.observe_tick(
+            timestamp=tick.ingress_ts,
+            mid=tick.mid,
+            spread_bps=tick.spread_bps,
+        )
+        if fv is None:
+            return None
 
-    async def stream(self) -> AsyncIterator[TickEvent]:
-        if self._client is None:
-            raise RuntimeError("CexFeed must be used as an async context manager")
+        posterior = self._classifier.observe(fv)
+        self._last_regime = posterior
+        self._last_timestamp = fv.timestamp
+        return posterior
 
-        while True:
-            order_book = await self._client.fetch_order_book(self._symbol, limit=1)
-            ingress = datetime.now(timezone.utc)
-            bids = order_book.get("bids") or []
-            asks = order_book.get("asks") or []
-            if not bids or not asks:
-                await asyncio.sleep(self._poll_ms / 1000.0)
-                continue
+    def observe_disagreement(self, event) -> None:
+        """
+        Consume a DisagreementEvent. This enriches the feature stream
+        with cross-feed disagreement intensity. Does not directly emit a
+        posterior — its effect is felt on the next tick.
+        """
+        if event.symbol != self.cfg.symbol:
+            return
+        self._features.observe_disagreement(event.magnitude)
 
-            venue_ts_raw = order_book.get("timestamp")
-            venue_ts = (
-                datetime.fromtimestamp(venue_ts_raw / 1000.0, tz=timezone.utc)
-                if venue_ts_raw is not None
-                else ingress
-            )
-            bp, bs = bids[0]
-            ap, as_ = asks[0]
+    # ── Hypothesis-PnL inputs (from Phase 2/3) ─────────────────
 
-            yield TickEvent(
-                feed_kind=FeedKind.CEX,
-                venue=self.venue,
-                symbol=self._symbol,
-                venue_ts=venue_ts,
-                ingress_ts=ingress,
-                bid_price=Decimal(str(bp)),
-                bid_size=Decimal(str(bs)),
-                ask_price=Decimal(str(ap)),
-                ask_size=Decimal(str(as_)),
-            )
-            await asyncio.sleep(self._poll_ms / 1000.0)
+    def report_hypothesis_pnl(self, pnl_by_hypothesis: Mapping[str, Decimal]) -> None:
+        self._ensemble.report_pnl(pnl_by_hypothesis)
+
+    # ── Outputs to Phase 2 ────────────────────────────────────
+
+    def snapshot(self, window_end: datetime | None = None) -> MarketSnapshot | None:
+        """
+        Bundle the latest regime posterior + hypothesis weights into a
+        MarketSnapshot. Returns None if no regime posterior is yet
+        available (cold-start).
+
+        If window_end is provided, it is used for both sub-contracts so
+        the snapshot validates. If omitted, uses the last-observed tick
+        timestamp.
+        """
+        if self._last_regime is None or self._last_timestamp is None:
+            return None
+        ts = window_end or self._last_timestamp
+
+        # Re-emit regime posterior with the requested window_end so it
+        # aligns with hypothesis weights for snapshot validation.
+        regime_aligned = RegimePosterior(
+            symbol=self._last_regime.symbol,
+            window_end=ts,
+            probabilities=self._last_regime.probabilities,
+            observations_used=self._last_regime.observations_used,
+            half_life_observations=self._last_regime.half_life_observations,
+        )
+        hyp = self._ensemble.weights(window_end=ts)
+
+        return MarketSnapshot(
+            symbol=self.cfg.symbol,
+            window_end=ts,
+            regime=regime_aligned,
+            hypotheses=hyp,
+        )
+
+    # ── Inspection helpers ────────────────────────────────────
+
+    @property
+    def latest_regime(self) -> RegimePosterior | None:
+        return self._last_regime

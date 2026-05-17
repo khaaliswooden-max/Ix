@@ -1,106 +1,105 @@
-# ix-substrate
+# ix-world-model
 
-**Phase 0 of the IX agent — the market-data substrate.**
+**Phase 1 of the IX agent — the Bayesian world model.**
 
-This is the lowest layer of the seven-layer IX architecture described in
-the [IX whitepaper](https://github.com/visionblox/ix-whitepaper). It
-ingests market data from multiple venues, reconciles cross-feed
-observations onto a common time grid, and emits two contract types
-downstream:
+This is the second layer of the seven-layer IX architecture. It consumes
+typed event streams from Phase 0 (`ix-substrate`) and emits typed
+posteriors that Phase 2 (strategy synthesis) consumes.
 
-- **`TickEvent`** — best bid / best ask from one venue at one moment.
-- **`DisagreementEvent`** — a typed observation that two feeds disagree
-  beyond their expected no-arbitrage band. **This is the non-obvious
-  gap** that distinguishes IX from prior-art reconciliation systems
-  (USPTO cluster G06Q40/04): instead of averaging disagreement away to
-  produce a "true price," IX preserves disagreement as a first-class
-  signal for downstream layers.
+## What Phase 1 does
 
-See [`docs/ADR-0002-disagreement-as-alpha.md`](docs/ADR-0002-disagreement-as-alpha.md)
-for the architectural rationale.
+Two Bayesian mixtures running in parallel, both restricted to tractable
+finite classes (the AIXI-flavored pattern from the IX whitepaper, made
+concrete):
+
+1. **Regime classifier**: discrete probability distribution over five
+   market regimes (`TREND_UP`, `TREND_DOWN`, `MEAN_REVERT`, `VOLATILE`,
+   `BROKEN`), updated by Dirichlet credit assignment over realized
+   feature likelihoods.
+
+2. **Hypothesis ensemble**: weights over a named ensemble of strategy
+   hypotheses, updated by their realized out-of-sample PnL. The
+   ensemble does *not* execute strategies — Phase 2 does. The world
+   model's job is induction; the strategy layer's job is action.
+
+Both mixtures emit through the same contract surface (`pydantic`,
+frozen, schema-versioned), joined into `MarketSnapshot` events that
+Phase 2 reads.
+
+## Contracts
+
+```python
+from ix_world_model.contracts.events import (
+    Regime,             # 5-state enum
+    RegimePosterior,    # P(regime | data)
+    HypothesisWeights,  # P(hypothesis credit | realized PnL)
+    MarketSnapshot,     # joined regime + hypotheses
+)
+```
 
 ## Quick start
 
 ```bash
-# Install (Python 3.11+)
-pip install -e ".[dev,cex]"
-
-# Verify the math without touching the network
-python examples/run_btc_reconciliation.py
-
-# Run the tests
+# Phase 0 (ix-substrate) must be installed first.
+pip install -e ".[dev]"
 pytest -v
-
-# Run the live substrate against the example config (real CEX REST calls)
-ix-substrate run --config configs/substrate.example.yaml
+python examples/run_world_model_demo.py
 ```
 
 ## Architecture
 
 ```
-                ┌──────────────────────────────────────────────┐
-                │                Phase 0 — Substrate           │
-                │                                              │
-   ┌────────┐   │   ┌─────────────┐    ┌──────────────────┐    │
-   │  CEX   │───┼──▶│  feeds.cex  │───▶│                  │    │
-   │ (ccxt) │   │   └─────────────┘    │   alignment      │    │
-   └────────┘   │                      │   (time-bucket)  │    │
-                │   ┌─────────────┐    │                  │    │
-   ┌────────┐   │   │  feeds.dex  │───▶│                  │    │
-   │  DEX   │───┼──▶│  (web3, 0.2)│    └────────┬─────────┘    │
-   │(web3)  │   │   └─────────────┘             │              │
-   └────────┘   │                               ▼              │
-                │                      ┌──────────────────┐    │
-   ┌────────┐   │   ┌──────────────┐   │  disagreement    │    │
-   │chain-  │   │   │feeds.onchain │   │  detector        │    │
-   │events  │───┼──▶│  (web3, 0.3) │   │   (the gap)      │    │
-   └────────┘   │   └──────────────┘   └────────┬─────────┘    │
-                │                               │              │
-                │             ┌─────────────────┴───────────┐  │
-                │             ▼                             ▼  │
-                │   ┌──────────────────┐         ┌──────────────────┐
-                │   │ ticks table      │         │ disagreements    │
-                │   │ (DuckDB / CH)    │         │ table (DuckDB)   │
-                │   └──────────────────┘         └──────────────────┘
-                └──────────────────────────────────────────────┘
-                                       │
-                                       ▼
-                              Phase 1 — World Model
-                              (consumes both contracts)
+                            ┌────────────────────────────────────────┐
+                            │           Phase 1 — World Model        │
+                            │                                        │
+   TickEvent ────────────▶  │   FeatureExtractor  ──▶  RegimeClassifier
+   (from Phase 0)           │       (online)            (Bayesian-Dirichlet)
+                            │           │                       │
+   DisagreementEvent ─────▶ │           ▼                       │
+   (from Phase 0)           │   features.disagreement_intensity │
+                            │                                   │
+   Phase 2/3 realized PnL  │                                   ▼
+   ────────────────────▶    │   HypothesisEnsemble  ──▶  RegimePosterior
+                            │   (Bayesian softmax)              +
+                            │                                   HypothesisWeights
+                            │                                   │
+                            │                                   ▼
+                            │                          ┌──────────────────┐
+                            │                          │  MarketSnapshot  │
+                            │                          └──────────────────┘
+                            └────────────────────────────────────────┘
+                                                       │
+                                                       ▼
+                                            Phase 2 — Strategy Synthesis
 ```
 
 ## Package layout
 
 ```
-src/ix_substrate/
+src/ix_world_model/
 ├── __init__.py
-├── cli.py                       # `ix-substrate run …`
-├── config.py                    # YAML config schema
 ├── contracts/
-│   └── events.py                # TickEvent, DisagreementEvent  (the contract surface)
-├── feeds/
-│   ├── base.py                  # Feed protocol
-│   ├── cex.py                   # working: ccxt REST-polled CEX feeds
-│   ├── dex.py                   # extension point — Phase 0.2
-│   └── onchain.py               # extension point — Phase 0.3
-├── reconciliation/
-│   ├── alignment.py             # time-bucket pairing of cross-feed ticks
-│   ├── clock.py                 # per-venue clock-skew EMA
-│   └── disagreement.py          # PriceDisagreementDetector (the non-obvious gap)
-└── storage/
-    ├── schema.py                # Arrow schemas
-    └── duckdb_store.py          # local sink; swap to ClickHouse for prod
+│   └── events.py             # Regime, RegimePosterior, HypothesisWeights, MarketSnapshot
+├── regimes/
+│   ├── features.py           # Online feature extraction
+│   └── classifier.py         # Bayesian regime classifier (Dirichlet)
+├── hypotheses/
+│   └── ensemble.py           # Hypothesis credit-assignment ensemble
+└── inference/
+    └── orchestrator.py       # WorldModel — wires Phase 0 events to outputs
 ```
 
 ## Roadmap
 
-- **v0.1 (this drop)**: Working CEX → align → price-disagreement → DuckDB.
-- **v0.2**: DEX feeds (Uniswap V3 first); `DirectionDisagreement` and
-  `LatencyLead` detectors; ClickHouse adapter; metrics endpoint.
-- **v0.3**: On-chain event feed; `LiquidityDisagreement` detector;
-  Parquet archival sink for historical replay.
-- **v1.0**: Phase 0 frozen contract surface that Phase 1 (world model)
-  can depend on without churn.
+- **v0.1 (this drop)**: 5-regime classifier; named-hypothesis ensemble;
+  orchestrator wired to Phase 0 contracts.
+- **v0.2**: HMM transition model for regime persistence; CTW (Context
+  Tree Weighting) module as alternative regime backend (closer to the
+  MC-AIXI-CTW lineage).
+- **v0.3**: Phase 6 (self-improvement) hook for online updates to
+  regime profile parameters from realized strategy PnL.
+- **v1.0**: Frozen contract surface that Phase 2 can depend on without
+  churn.
 
 ## License
 

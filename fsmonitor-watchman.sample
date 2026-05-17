@@ -1,110 +1,227 @@
 """
-ix_substrate.contracts.events
-─────────────────────────────
-Data contracts emitted by Phase 0 (Substrate) and consumed by Phase 1
-(World Model). These are append-only, content-addressable, and versioned.
+ix_world_model.regimes.classifier
+──────────────────────────────────
+Bayesian classifier over discrete regime states.
 
-Design principle: the substrate layer is the *only* layer that emits raw
-market events. Every downstream layer (world model, strategy, risk)
-consumes these contracts, never raw feed payloads. This is what makes the
-seven-layer architecture clean.
+Architecture
+─────────────
+For each Regime r, we maintain:
+
+  - a *profile*: the expected (mean) feature vector under that regime,
+    plus per-feature standard deviations
+  - a *Dirichlet prior count* representing how often r has been
+    "credited" with explaining observed features
+
+On each new FeatureVector:
+
+  1. Compute likelihood P(features | regime) under a diagonal Gaussian
+     centered on the profile for each regime.
+  2. Update Dirichlet counts via soft credit assignment (proportional to
+     likelihood).
+  3. Emit a RegimePosterior by normalizing Dirichlet counts.
+
+Why this design
+───────────────
+This is *AIXI's mixture-of-experts pattern, finitized*. Each regime is an
+"expert hypothesis" about how the market behaves; the Dirichlet
+posterior is the AIXI-style credit assignment, restricted to a finite
+tractable model class. Solomonoff's universal prior is replaced by a
+uniform Dirichlet prior over regimes; the mixture weighting comes from
+realized likelihoods rather than program length.
+
+Profiles are configurable. v0.1 ships with literature-default profiles
+that work as cold-start priors. Phase 6 (self-improvement) will update
+profile parameters from realized PnL — but that's deferred until Phase
+1-2-3 are running.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from decimal import Decimal
-from enum import Enum
-from typing import Literal
+import math
+from dataclasses import dataclass, field
+from datetime import datetime
 
-from pydantic import BaseModel, Field, ConfigDict
-
-
-SCHEMA_VERSION = "0.1.0"
+from ..contracts.events import Regime, RegimePosterior
+from .features import FeatureVector
 
 
-class FeedKind(str, Enum):
-    """Origin class of a market data feed."""
-    CEX = "cex"            # centralized exchange (ccxt-backed)
-    DEX = "dex"            # decentralized exchange (web3-backed)
-    ONCHAIN = "onchain"    # raw chain events (transfers, contract logs)
-    OFFCHAIN = "offchain"  # news, social, regulatory
+# ── Regime profiles (the model class) ───────────────────────────────────
 
-
-class Side(str, Enum):
-    BID = "bid"
-    ASK = "ask"
-
-
-class _ImmutableModel(BaseModel):
-    """Frozen, validated, hashable base. Contracts are append-only."""
-    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
-
-
-# ── Tick events ──────────────────────────────────────────────────────────
-
-class TickEvent(_ImmutableModel):
+@dataclass(frozen=True)
+class RegimeProfile:
     """
-    A single observation of best bid / best ask on one venue.
+    Expected feature values under a regime, with per-feature spread used
+    as the Gaussian likelihood scale.
 
-    Timestamps are explicit:
-      - venue_ts: timestamp claimed by the exchange (may be skewed)
-      - ingress_ts: timestamp at which we received it (NTP-disciplined)
-    The skew (ingress_ts - venue_ts) is itself a signal — see clock.py.
+    All scales must be > 0.
     """
-    schema_version: str = SCHEMA_VERSION
-    feed_kind: FeedKind
-    venue: str                                 # e.g. "binance", "coinbase"
-    symbol: str                                # canonical symbol, e.g. "BTC/USDT"
-    venue_ts: datetime                         # exchange-reported timestamp
-    ingress_ts: datetime                       # our NTP-disciplined receive time
-    bid_price: Decimal
-    bid_size: Decimal
-    ask_price: Decimal
-    ask_size: Decimal
+    realized_vol_mean:           float
+    realized_vol_scale:          float
+    autocorr_lag1_mean:          float
+    autocorr_lag1_scale:         float
+    spread_bps_mean:             float
+    spread_bps_scale:            float
+    disagreement_intensity_mean: float
+    disagreement_intensity_scale: float
+
+    def log_likelihood(self, fv: FeatureVector) -> float:
+        """log P(features | this regime) under independent Gaussians."""
+        return (
+            _log_gauss(fv.realized_vol_annualized,    self.realized_vol_mean,    self.realized_vol_scale)
+            + _log_gauss(fv.autocorr_lag1,            self.autocorr_lag1_mean,   self.autocorr_lag1_scale)
+            + _log_gauss(fv.spread_bps_mean,          self.spread_bps_mean,      self.spread_bps_scale)
+            + _log_gauss(fv.disagreement_intensity_bps, self.disagreement_intensity_mean, self.disagreement_intensity_scale)
+        )
+
+
+def _log_gauss(x: float, mu: float, sigma: float) -> float:
+    if sigma <= 0:
+        raise ValueError(f"sigma must be positive (got {sigma})")
+    z = (x - mu) / sigma
+    return -0.5 * z * z - math.log(sigma) - 0.5 * math.log(2 * math.pi)
+
+
+# ── Cold-start default profiles ──────────────────────────────────────────
+#
+# IMPORTANT: These defaults are calibrated for **minute-cadence** crypto
+# data (one observation per minute, annualization factor 365*24*60 ≈ 525K).
+#
+# If you feed second-cadence data into a classifier using these profiles,
+# realized vol will be much higher than the profiles expect and the
+# classifier will lock onto VOLATILE or BROKEN. Either:
+#
+#   (a) downsample your tick stream to minute-cadence before classification, or
+#   (b) supply custom profiles whose feature scales match your cadence, or
+#   (c) preprocess realized_vol_annualized to match the calibration cadence
+#       (multiply by sqrt(target_cadence / actual_cadence)).
+#
+# Phase 6 (self-improvement) will fit these profiles to realized data
+# automatically, eliminating the manual calibration step. Until then,
+# document the cadence assumption alongside any new strategy that uses
+# the classifier.
+
+DEFAULT_PROFILES: dict[Regime, RegimeProfile] = {
+    Regime.TREND_UP: RegimeProfile(
+        realized_vol_mean=0.40,           realized_vol_scale=0.20,
+        autocorr_lag1_mean=0.15,          autocorr_lag1_scale=0.10,
+        spread_bps_mean=3.0,              spread_bps_scale=2.0,
+        disagreement_intensity_mean=2.0,  disagreement_intensity_scale=2.0,
+    ),
+    Regime.TREND_DOWN: RegimeProfile(
+        realized_vol_mean=0.60,           realized_vol_scale=0.30,
+        autocorr_lag1_mean=0.15,          autocorr_lag1_scale=0.10,
+        spread_bps_mean=4.0,              spread_bps_scale=3.0,
+        disagreement_intensity_mean=3.0,  disagreement_intensity_scale=2.5,
+    ),
+    Regime.MEAN_REVERT: RegimeProfile(
+        realized_vol_mean=0.30,           realized_vol_scale=0.15,
+        autocorr_lag1_mean=-0.10,         autocorr_lag1_scale=0.08,
+        spread_bps_mean=2.5,              spread_bps_scale=1.5,
+        disagreement_intensity_mean=1.5,  disagreement_intensity_scale=1.5,
+    ),
+    Regime.VOLATILE: RegimeProfile(
+        realized_vol_mean=1.00,           realized_vol_scale=0.40,
+        autocorr_lag1_mean=0.0,           autocorr_lag1_scale=0.15,
+        spread_bps_mean=8.0,              spread_bps_scale=4.0,
+        disagreement_intensity_mean=6.0,  disagreement_intensity_scale=4.0,
+    ),
+    Regime.BROKEN: RegimeProfile(
+        realized_vol_mean=2.50,           realized_vol_scale=1.0,
+        autocorr_lag1_mean=0.0,           autocorr_lag1_scale=0.30,
+        spread_bps_mean=40.0,             spread_bps_scale=30.0,
+        disagreement_intensity_mean=40.0, disagreement_intensity_scale=25.0,
+    ),
+}
+
+
+# ── Classifier ───────────────────────────────────────────────────────────
+
+@dataclass
+class ClassifierConfig:
+    """
+    prior_strength:
+        Total pseudo-count in the symmetric Dirichlet prior. Higher =
+        slower to update, more conservative. 5.0 is a reasonable start
+        (one effective observation per regime).
+
+    decay:
+        Per-step multiplicative decay applied to counts before each
+        update. Implements an effective rolling-window over observations
+        so the posterior tracks regime changes instead of accumulating
+        forever. 0.99 = roughly 100-observation half-life.
+
+    min_count:
+        Floor on each Dirichlet count after decay, to keep probabilities
+        bounded away from 0/1 (which would prevent regime switching).
+    """
+    prior_strength: float = 5.0
+    decay: float = 0.99
+    min_count: float = 0.05
+
+
+class RegimeClassifier:
+    """
+    One classifier per symbol. Pump FeatureVectors in; get
+    RegimePosteriors out.
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        profiles: dict[Regime, RegimeProfile] | None = None,
+        config: ClassifierConfig | None = None,
+    ):
+        self.symbol = symbol
+        self.profiles = profiles or DEFAULT_PROFILES
+        self.cfg = config or ClassifierConfig()
+        n_regimes = len(self.profiles)
+        initial = self.cfg.prior_strength / n_regimes
+        self._counts: dict[Regime, float] = {r: initial for r in self.profiles}
+        self._observations = 0
+        self._last_mode: Regime | None = None
+        self._mode_run_length: int = 0
+
+    def observe(self, fv: FeatureVector) -> RegimePosterior:
+        """Update with one feature vector; emit current posterior."""
+        # 1. Decay counts (rolling-window via exponential weighting)
+        for r in self._counts:
+            self._counts[r] = max(self.cfg.min_count, self._counts[r] * self.cfg.decay)
+
+        # 2. Log-likelihoods per regime
+        log_liks = {r: prof.log_likelihood(fv) for r, prof in self.profiles.items()}
+
+        # 3. Softmax to get normalized likelihoods (numerically stable)
+        max_ll = max(log_liks.values())
+        exps = {r: math.exp(ll - max_ll) for r, ll in log_liks.items()}
+        Z = sum(exps.values())
+        liks = {r: e / Z for r, e in exps.items()}
+
+        # 4. Soft credit assignment: add likelihood to each count
+        for r, l in liks.items():
+            self._counts[r] += l
+
+        self._observations += 1
+
+        # 5. Normalize to posterior probabilities
+        total = sum(self._counts.values())
+        probs = {r: c / total for r, c in self._counts.items()}
+
+        # 6. Track mode persistence
+        current_mode = max(probs.items(), key=lambda kv: kv[1])[0]
+        if current_mode == self._last_mode:
+            self._mode_run_length += 1
+        else:
+            self._last_mode = current_mode
+            self._mode_run_length = 1
+
+        return RegimePosterior(
+            symbol=self.symbol,
+            window_end=fv.timestamp,
+            probabilities=probs,
+            observations_used=self._observations,
+            half_life_observations=float(self._mode_run_length),
+        )
 
     @property
-    def mid(self) -> Decimal:
-        return (self.bid_price + self.ask_price) / Decimal(2)
-
-    @property
-    def spread_bps(self) -> Decimal:
-        """Spread in basis points (1bp = 0.01%)."""
-        if self.mid == 0:
-            return Decimal(0)
-        return (self.ask_price - self.bid_price) / self.mid * Decimal(10_000)
-
-    @property
-    def skew_ms(self) -> float:
-        """Positive = we received later than venue stamped."""
-        return (self.ingress_ts - self.venue_ts).total_seconds() * 1000.0
-
-
-# ── Reconciliation output ────────────────────────────────────────────────
-
-class DisagreementKind(str, Enum):
-    """What kind of cross-feed disagreement was detected."""
-    PRICE = "price"          # mid prices differ beyond expected band
-    DIRECTION = "direction"  # one feed says up, other says down (window)
-    LATENCY = "latency"      # one feed is persistently ahead of another
-    LIQUIDITY = "liquidity"  # depth profiles differ at similar prices
-
-
-class DisagreementEvent(_ImmutableModel):
-    """
-    Cross-feed disagreement, treated as alpha rather than noise.
-
-    Emitted whenever a configured detector finds disagreement that exceeds
-    its threshold. Persistence (half_life_ms) tells downstream layers
-    whether this is a fleeting microstructure anomaly or a regime signal.
-    """
-    schema_version: str = SCHEMA_VERSION
-    kind: DisagreementKind
-    symbol: str
-    venues: tuple[str, ...]                    # ordered, the comparison key
-    window_start: datetime
-    window_end: datetime
-    magnitude: Decimal                         # interpretation depends on kind
-    magnitude_unit: Literal["bps", "ms", "ratio", "boolean"]
-    leader: str | None = None                  # for LATENCY: which venue leads
-    half_life_ms: float | None = None          # persistence; None if too brief
-    raw_observations: int = Field(ge=2)
+    def counts(self) -> dict[Regime, float]:
+        """Read-only view of current Dirichlet counts (testing / debugging)."""
+        return dict(self._counts)
