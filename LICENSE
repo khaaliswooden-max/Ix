@@ -1,0 +1,78 @@
+IX — Proprietary Software License
+Copyright © 2026 Zuup Innovation Lab / Visionblox LLC. All rights reserved.
+
+1. DEFINITIONS
+
+   "Software" means the source code, object code, documentation,
+   specifications, whitepapers, architectural decision records, and all
+   other materials contained in this repository, including every package
+   under `packages/` and every document under `docs/`.
+
+   "Licensor" means Visionblox LLC, operating the Zuup Innovation Lab.
+
+   "You" means the individual or legal entity in possession of the
+   Software.
+
+2. GRANT OF RIGHTS
+
+   No rights are granted by this file. The Software is made available for
+   internal reference and evaluation by parties explicitly authorized in
+   writing by the Licensor. All rights not expressly granted in a separate,
+   signed written agreement are reserved by the Licensor.
+
+3. RESTRICTIONS
+
+   Except as expressly permitted by a separate written agreement with the
+   Licensor, You may not:
+
+   (a) copy, reproduce, or redistribute the Software, in whole or in part;
+   (b) modify, adapt, translate, or create derivative works of the
+       Software;
+   (c) sell, sublicense, lease, rent, loan, or otherwise transfer the
+       Software or any rights in it;
+   (d) use the Software to operate live trading, manage capital, or
+       provide services to third parties;
+   (e) remove, obscure, or alter any proprietary notice, label, or mark;
+   (f) reverse engineer, decompile, or disassemble any portion of the
+       Software except to the extent this restriction is prohibited by
+       applicable law.
+
+4. INTELLECTUAL PROPERTY
+
+   The Software embodies trade secrets and patent-pending mechanisms of
+   the Licensor, including (without limitation) the disagreement-as-alpha
+   reconciliation contract and the per-action Kolmogorov-complexity
+   penalty documented in `docs/`. The architectural decision records in
+   this repository establish priority dates for those mechanisms. Nothing
+   in this license transfers any patent, trademark, trade-secret, or
+   copyright interest.
+
+5. CONFIDENTIALITY
+
+   The Software is confidential. You shall protect it with at least the
+   degree of care You use for Your own confidential information of like
+   importance, and in no event less than a reasonable degree of care.
+
+6. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+   THE SOFTWARE IS RESEARCH-GRADE AND IS NOT INVESTMENT ADVICE. IT MAY
+   PRODUCE INCORRECT OR LOSS-BEARING OUTPUTS. YOU BEAR ALL RISK OF USE.
+
+7. LIMITATION OF LIABILITY
+
+   IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+   OTHER LIABILITY — INCLUDING DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   CONSEQUENTIAL, OR TRADING LOSSES — WHETHER IN AN ACTION OF CONTRACT,
+   TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. TERMINATION
+
+   Any authorization to possess or use the Software terminates
+   automatically upon breach of this license. Upon termination You shall
+   cease all use and destroy all copies of the Software in Your control.
+
+For licensing inquiries, contact Visionblox LLC.
